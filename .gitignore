@@ -19,4 +19,4 @@ build
 /.venv
 *.local*
 # Generated from scripts/build_kanjidic2_tsv.py (copy to SD as /dict/jp-dictionary.tsv)
-extras/dictionary/jp-dictionary.tsv
+#extras/dictionary/jp-dictionary.tsv
