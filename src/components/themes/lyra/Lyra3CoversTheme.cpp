@@ -11,6 +11,7 @@
 #include "components/UITheme.h"
 #include "components/icons/cover.h"
 #include "fontIds.h"
+#include "util/TextFontPick.h"
 
 // Internal constants
 namespace {
@@ -88,9 +89,11 @@ void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
 
       const int maxLineWidth = tileWidth - 2 * hPaddingInSelection;
 
-      auto titleLines = renderer.wrappedText(SMALL_FONT_ID, recentBooks[i].title.c_str(), maxLineWidth, 3);
+      const auto titlePick = TextFontPick::coversTileTitleFont(recentBooks[i].title.c_str());
+      auto titleLines =
+          renderer.wrappedText(titlePick.fontId, recentBooks[i].title.c_str(), maxLineWidth, 3, titlePick.style);
 
-      const int titleLineHeight = renderer.getLineHeight(SMALL_FONT_ID);
+      const int titleLineHeight = renderer.getLineHeight(titlePick.fontId);
       const int dynamicBlockHeight = static_cast<int>(titleLines.size()) * titleLineHeight;
       // Add a little padding below the text inside the selection box just like the top padding (5 + hPaddingSelection)
       const int dynamicTitleBoxHeight = dynamicBlockHeight + hPaddingInSelection + 5;
@@ -110,7 +113,8 @@ void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
 
       int currentY = tileY + Lyra3CoversMetrics::values.homeCoverHeight + hPaddingInSelection + 5;
       for (const auto& line : titleLines) {
-        renderer.drawText(SMALL_FONT_ID, tileX + hPaddingInSelection, currentY, line.c_str(), true);
+        renderer.drawText(titlePick.fontId, tileX + hPaddingInSelection, currentY, line.c_str(), true,
+                          titlePick.style);
         currentY += titleLineHeight;
       }
     }

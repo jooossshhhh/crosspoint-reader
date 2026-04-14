@@ -726,6 +726,14 @@ if compress:
     # are grouped together for efficient LRU caching on the embedded target.
     # Since glyphs are in codepoint order, glyphs in the same Unicode block
     # are contiguous in the array and form natural groups.
+    #
+    # ESP32-C3 (~380KB RAM): FontDecompressor::prewarmCache and getBitmap() each
+    # allocate a transient buffer of one group's full uncompressed (byte-aligned)
+    # size. Codepoints not matched below shared script id -1 and used to become
+    # one huge group (1000+ CJK glyphs → 200–320KB+) and crashed the device when
+    # opening a book with Noto Sans JP.
+    MAX_UNCOMPRESSED_GROUP_BYTES = 48 * 1024
+
     SCRIPT_GROUP_RANGES = [
         (0x0000, 0x007F),   # ASCII
         (0x0080, 0x00FF),   # Latin-1 Supplement
@@ -739,6 +747,11 @@ if compress:
         (0x20A0, 0x20CF),   # Currency Symbols
         (0x2190, 0x21FF),   # Arrows
         (0x2200, 0x22FF),   # Math Operators
+        (0x3000, 0x303F),   # CJK Symbols and Punctuation
+        (0x3040, 0x309F),   # Hiragana
+        (0x30A0, 0x30FF),   # Katakana
+        (0x31F0, 0x31FF),   # Katakana Phonetic Extensions
+        (0xFF00, 0xFFEE),   # Halfwidth and Fullwidth Forms (reader subset uses part of this block)
         (0xFB00, 0xFB06),   # Alphabetic Presentation Forms (ligatures)
         (0xFFFD, 0xFFFD),   # Replacement Character
     ]
@@ -749,24 +762,31 @@ if compress:
                 return i
         return -1
 
-    groups = []  # list of (first_glyph_index, glyph_count)
-    current_group_id = None
+    # list of (first_glyph_index, glyph_count); split on script change or uncompressed size cap
+    groups = []
     group_start = 0
-    group_count = 0
+    current_group_id = None
+    group_aligned_bytes = 0
 
     for i, (props, packed) in enumerate(all_glyphs):
         sg = get_script_group(props.code_point)
-        if sg != current_group_id:
-            if group_count > 0:
-                groups.append((group_start, group_count))
-            current_group_id = sg
-            group_start = i
-            group_count = 1
-        else:
-            group_count += 1
+        aligned_add = len(to_byte_aligned(packed, props.width, props.height))
 
-    if group_count > 0:
-        groups.append((group_start, group_count))
+        if i == 0:
+            current_group_id = sg
+            group_aligned_bytes = aligned_add
+            continue
+
+        if sg != current_group_id or group_aligned_bytes + aligned_add > MAX_UNCOMPRESSED_GROUP_BYTES:
+            groups.append((group_start, i - group_start))
+            group_start = i
+            current_group_id = sg
+            group_aligned_bytes = aligned_add
+        else:
+            group_aligned_bytes += aligned_add
+
+    if len(all_glyphs) > 0:
+        groups.append((group_start, len(all_glyphs) - group_start))
 
     # Compress each group
     compressed_groups = []  # list of (compressed_bytes, uncompressed_size, glyph_count, first_glyph_index)

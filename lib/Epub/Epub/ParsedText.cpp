@@ -3,6 +3,8 @@
 #include <GfxRenderer.h>
 #include <Utf8.h>
 
+#include "hyphenation/HyphenationCommon.h"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -54,6 +56,17 @@ void stripSoftHyphensInPlace(std::string& word) {
 // Returns the advance width for a word while ignoring soft hyphen glyphs and optionally appending a visible hyphen.
 // Uses advance width (sum of glyph advances + kerning) rather than bounding box width so that italic glyph overhangs
 // don't inflate inter-word spacing.
+bool wordContainsLatinOrCyrillic(const std::string& word) {
+  const auto* p = reinterpret_cast<const unsigned char*>(word.c_str());
+  while (*p) {
+    const uint32_t cp = utf8NextCodepoint(&p);
+    if (isLatinLetter(cp) || isCyrillicLetter(cp)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 uint16_t measureWordWidth(const GfxRenderer& renderer, const int fontId, const std::string& word,
                           const EpdFontFamily::Style style, const bool appendHyphen = false) {
   if (word.size() == 1 && word[0] == ' ' && !appendHyphen) {
@@ -365,6 +378,10 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   // Collect candidate breakpoints (byte offsets and hyphen requirements).
   auto breakInfos = Hyphenator::breakOffsets(word, allowFallbackBreaks);
   if (breakInfos.empty()) {
+    // CJK / unhyphenatable scripts: wrap at codepoint boundaries without inserting '-'.
+    if (!wordContainsLatinOrCyrillic(word)) {
+      return splitNonLatinWordByMeasurement(wordIndex, availableWidth, renderer, fontId, wordWidths);
+    }
     return false;
   }
 
@@ -431,6 +448,45 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   // Update cached widths to reflect the new prefix/remainder pairing.
   wordWidths[wordIndex] = static_cast<uint16_t>(chosenWidth);
   const uint16_t remainderWidth = measureWordWidth(renderer, fontId, remainder, style);
+  wordWidths.insert(wordWidths.begin() + wordIndex + 1, remainderWidth);
+  return true;
+}
+
+bool ParsedText::splitNonLatinWordByMeasurement(const size_t wordIndex, const int availableWidth,
+                                              const GfxRenderer& renderer, const int fontId,
+                                              std::vector<uint16_t>& wordWidths) {
+  const std::string& word = words[wordIndex];
+  const auto style = wordStyles[wordIndex];
+
+  const auto* base = reinterpret_cast<const unsigned char*>(word.c_str());
+  const unsigned char* p = base;
+  size_t lastFitByte = 0;
+  int lastFitWidth = -1;
+
+  while (*p) {
+    utf8NextCodepoint(&p);
+    const size_t byteLen = static_cast<size_t>(p - base);
+    const int w = measureWordWidth(renderer, fontId, std::string(reinterpret_cast<const char*>(base), byteLen), style);
+    if (w <= availableWidth) {
+      lastFitByte = byteLen;
+      lastFitWidth = w;
+    } else {
+      break;
+    }
+  }
+
+  if (lastFitByte == 0 || lastFitWidth < 0 || lastFitByte >= word.size()) {
+    return false;
+  }
+
+  std::string remainder = word.substr(lastFitByte);
+  words[wordIndex].resize(lastFitByte);
+  words.insert(words.begin() + wordIndex + 1, std::move(remainder));
+  wordStyles.insert(wordStyles.begin() + wordIndex + 1, style);
+  wordContinues.insert(wordContinues.begin() + wordIndex + 1, false);
+
+  wordWidths[wordIndex] = static_cast<uint16_t>(lastFitWidth);
+  const uint16_t remainderWidth = measureWordWidth(renderer, fontId, words[wordIndex + 1], style);
   wordWidths.insert(wordWidths.begin() + wordIndex + 1, remainderWidth);
   return true;
 }

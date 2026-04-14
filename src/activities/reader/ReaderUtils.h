@@ -1,6 +1,7 @@
 #pragma once
 
 #include <CrossPointSettings.h>
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
 
@@ -9,6 +10,15 @@
 namespace ReaderUtils {
 
 constexpr unsigned long GO_HOME_MS = 1000;
+
+/// Frees compressed-font page buffers and hot-group RAM held by the reader. Call when exiting
+/// reader activities so Home / chrome can draw CJK titles without hitting OOM right after
+/// a heavy JP reading session.
+inline void releaseReaderFontDecompressionCache(GfxRenderer& renderer) {
+  if (FontCacheManager* fcm = renderer.getFontCacheManager()) {
+    fcm->clearCache();
+  }
+}
 
 inline void applyOrientation(GfxRenderer& renderer, const uint8_t orientation) {
   switch (orientation) {

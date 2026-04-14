@@ -69,4 +69,8 @@ class LyraTheme : public BaseTheme {
   void drawTextField(const GfxRenderer& renderer, Rect rect, const int textWidth) const override;
   void drawKeyboardKey(const GfxRenderer& renderer, Rect rect, const char* label, const bool isSelected) const override;
   bool showsFileIcons() const override { return true; }
+
+ private:
+  /// Cover bitmap width used for Lyra home "continue" layout; persists after the first successful paint.
+  mutable uint16_t homeContinueCoverLayoutPx_{0};
 };

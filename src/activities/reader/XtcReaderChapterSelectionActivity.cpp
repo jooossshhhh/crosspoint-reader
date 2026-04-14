@@ -8,6 +8,7 @@
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/TextFontPick.h"
 
 int XtcReaderChapterSelectionActivity::getPageItems() const {
   constexpr int lineHeight = 30;
@@ -127,7 +128,12 @@ void XtcReaderChapterSelectionActivity::render(RenderLock&&) {
   for (int i = pageStartIndex; i < static_cast<int>(chapters.size()) && i < pageStartIndex + pageItems; i++) {
     const auto& chapter = chapters[i];
     const char* title = chapter.name.empty() ? tr(STR_UNNAMED) : chapter.name.c_str();
-    renderer.drawText(UI_10_FONT_ID, contentX + 20, 60 + contentY + (i % pageItems) * 30, title, i != selectorIndex);
+    const int indentSize = contentX + 20;
+    const int displayY = 60 + contentY + (i % pageItems) * 30;
+    const auto chapPick = TextFontPick::listPrimaryLineFont(title);
+    const std::string chapterName =
+        renderer.truncatedText(chapPick.fontId, title, contentWidth - 40 - indentSize, chapPick.style);
+    renderer.drawText(chapPick.fontId, indentSize, displayY, chapterName.c_str(), i != selectorIndex, chapPick.style);
   }
 
   // Skip button hints in landscape CW mode (they overlap content)

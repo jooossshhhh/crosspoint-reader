@@ -83,6 +83,18 @@ std::vector<Hyphenator::BreakInfo> buildExplicitBreakInfos(const std::vector<Cod
 
 bool isSegmentSeparator(const uint32_t cp) { return isExplicitHyphen(cp) || isApostrophe(cp); }
 
+// TeX-style "every N codepoints" fallback only makes sense for scripts that use ASCII hyphens
+// at line breaks. CJK (and most non-Latin) text must not get this — with no Liang patterns
+// (e.g. language "ja") the fallback was inserting '-' after every few characters.
+bool hasLatinOrCyrillicLetter(const std::vector<CodepointInfo>& cps) {
+  for (const auto& cp : cps) {
+    if (isLatinLetter(cp.value) || isCyrillicLetter(cp.value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void appendSegmentPatternBreaks(const std::vector<CodepointInfo>& cps, const LanguageHyphenator& hyphenator,
                                 const bool includeFallback, std::vector<Hyphenator::BreakInfo>& outBreaks) {
   size_t segStart = 0;
@@ -98,7 +110,7 @@ void appendSegmentPatternBreaks(const std::vector<CodepointInfo>& cps, const Lan
       std::vector<CodepointInfo> segment(cps.begin() + segStart, cps.begin() + i);
       auto segIndexes = hyphenator.breakIndexes(segment);
 
-      if (includeFallback && segIndexes.empty()) {
+      if (includeFallback && segIndexes.empty() && hasLatinOrCyrillicLetter(segment)) {
         const size_t minPrefix = hyphenator.minPrefix();
         const size_t minSuffix = hyphenator.minSuffix();
         for (size_t idx = minPrefix; idx + minSuffix <= segment.size(); ++idx) {
@@ -240,8 +252,8 @@ std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string& w
     indexes = hyphenator->breakIndexes(cps);
   }
 
-  // Only add fallback breaks if needed
-  if (includeFallback && indexes.empty()) {
+  // Only add fallback breaks if needed (never for pure CJK / non-Latin script "words").
+  if (includeFallback && indexes.empty() && hasLatinOrCyrillicLetter(cps)) {
     const size_t minPrefix = hyphenator ? hyphenator->minPrefix() : LiangWordConfig::kDefaultMinPrefix;
     const size_t minSuffix = hyphenator ? hyphenator->minSuffix() : LiangWordConfig::kDefaultMinSuffix;
     for (size_t idx = minPrefix; idx + minSuffix <= cps.size(); ++idx) {

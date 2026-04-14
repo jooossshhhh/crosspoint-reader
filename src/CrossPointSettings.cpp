@@ -150,7 +150,12 @@ bool CrossPointSettings::loadFromBinaryFile() {
     if (++settingsRead >= fileSettingsCount) break;
     readAndValidate(inputFile, sideButtonLayout, SIDE_BUTTON_LAYOUT_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
-    readAndValidate(inputFile, fontFamily, FONT_FAMILY_COUNT);
+    {
+      uint8_t rawFontFamily = BOOKERLY;
+      serialization::readPod(inputFile, rawFontFamily);
+      // Legacy four-way family: 0 Bookerly, 1 Noto Sans, 2 Open Dyslexic, 3 Noto Sans JP.
+      fontFamily = (rawFontFamily == 3) ? NOTOSANSJP : BOOKERLY;
+    }
     if (++settingsRead >= fileSettingsCount) break;
     readAndValidate(inputFile, fontSize, FONT_SIZE_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
@@ -227,6 +232,16 @@ bool CrossPointSettings::loadFromBinaryFile() {
 
 float CrossPointSettings::getReaderLineCompression() const {
   switch (fontFamily) {
+    case NOTOSANSJP:
+      switch (lineSpacing) {
+        case TIGHT:
+          return 0.90f;
+        case NORMAL:
+        default:
+          return 0.95f;
+        case WIDE:
+          return 1.0f;
+      }
     case BOOKERLY:
     default:
       switch (lineSpacing) {
@@ -237,26 +252,6 @@ float CrossPointSettings::getReaderLineCompression() const {
           return 1.0f;
         case WIDE:
           return 1.1f;
-      }
-    case NOTOSANS:
-      switch (lineSpacing) {
-        case TIGHT:
-          return 0.90f;
-        case NORMAL:
-        default:
-          return 0.95f;
-        case WIDE:
-          return 1.0f;
-      }
-    case OPENDYSLEXIC:
-      switch (lineSpacing) {
-        case TIGHT:
-          return 0.90f;
-        case NORMAL:
-        default:
-          return 0.95f;
-        case WIDE:
-          return 1.0f;
       }
   }
 }
@@ -295,6 +290,17 @@ int CrossPointSettings::getRefreshFrequency() const {
 
 int CrossPointSettings::getReaderFontId() const {
   switch (fontFamily) {
+    case NOTOSANSJP:
+      // Only 14pt and 18pt are compiled in (flash); map reader sizes to the nearest embedded face.
+      switch (fontSize) {
+        case SMALL:
+        case MEDIUM:
+        default:
+          return NOTOSANSJP_14_FONT_ID;
+        case LARGE:
+        case EXTRA_LARGE:
+          return NOTOSANSJP_18_FONT_ID;
+      }
     case BOOKERLY:
     default:
       switch (fontSize) {
@@ -307,30 +313,6 @@ int CrossPointSettings::getReaderFontId() const {
           return BOOKERLY_16_FONT_ID;
         case EXTRA_LARGE:
           return BOOKERLY_18_FONT_ID;
-      }
-    case NOTOSANS:
-      switch (fontSize) {
-        case SMALL:
-          return NOTOSANS_12_FONT_ID;
-        case MEDIUM:
-        default:
-          return NOTOSANS_14_FONT_ID;
-        case LARGE:
-          return NOTOSANS_16_FONT_ID;
-        case EXTRA_LARGE:
-          return NOTOSANS_18_FONT_ID;
-      }
-    case OPENDYSLEXIC:
-      switch (fontSize) {
-        case SMALL:
-          return OPENDYSLEXIC_8_FONT_ID;
-        case MEDIUM:
-        default:
-          return OPENDYSLEXIC_10_FONT_ID;
-        case LARGE:
-          return OPENDYSLEXIC_12_FONT_ID;
-        case EXTRA_LARGE:
-          return OPENDYSLEXIC_14_FONT_ID;
       }
   }
 }

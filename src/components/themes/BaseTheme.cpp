@@ -13,6 +13,7 @@
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/TextFontPick.h"
 
 // Internal constants
 namespace {
@@ -274,16 +275,18 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
 
     // Draw name
     auto itemName = rowTitle(i);
-    auto font = (rowSubtitle != nullptr) ? UI_12_FONT_ID : UI_10_FONT_ID;
-    auto item = renderer.truncatedText(font, itemName.c_str(), textWidth);
-    renderer.drawText(font, rect.x + BaseMetrics::values.contentSidePadding, itemY, item.c_str(), i != selectedIndex);
+    const auto titlePick = TextFontPick::listRowTitleFont(itemName.c_str(), rowSubtitle != nullptr);
+    auto item = renderer.truncatedText(titlePick.fontId, itemName.c_str(), textWidth, titlePick.style);
+    renderer.drawText(titlePick.fontId, rect.x + BaseMetrics::values.contentSidePadding, itemY, item.c_str(),
+                      i != selectedIndex, titlePick.style);
 
     if (rowSubtitle != nullptr) {
       // Draw subtitle
       std::string subtitleText = rowSubtitle(i);
-      auto subtitle = renderer.truncatedText(UI_10_FONT_ID, subtitleText.c_str(), textWidth);
-      renderer.drawText(UI_10_FONT_ID, rect.x + BaseMetrics::values.contentSidePadding, itemY + 30, subtitle.c_str(),
-                        i != selectedIndex);
+      const auto subPick = TextFontPick::subtitleChromeFont(subtitleText.c_str());
+      auto subtitle = renderer.truncatedText(subPick.fontId, subtitleText.c_str(), textWidth, subPick.style);
+      renderer.drawText(subPick.fontId, rect.x + BaseMetrics::values.contentSidePadding, itemY + 30, subtitle.c_str(),
+                        i != selectedIndex, subPick.style);
     }
 
     if (rowValue != nullptr) {
@@ -527,16 +530,20 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     const std::string& lastBookTitle = recentBooks[0].title;
     const std::string& lastBookAuthor = recentBooks[0].author;
 
+    const auto titlePick = TextFontPick::titleChromeFont(lastBookTitle.c_str());
+    const auto authorPick = TextFontPick::subtitleChromeFont(lastBookAuthor.c_str());
+
     // Invert text colors based on selection state:
     // - With cover: selected = white text on black box, unselected = black text on white box
     // - Without cover: selected = white text on black card, unselected = black text on white card
 
-    auto lines = renderer.wrappedText(UI_12_FONT_ID, lastBookTitle.c_str(), bookWidth - 40, 3);
+    auto lines = renderer.wrappedText(titlePick.fontId, lastBookTitle.c_str(), bookWidth - 40, 3, titlePick.style);
 
     // Book title text
-    int totalTextHeight = renderer.getLineHeight(UI_12_FONT_ID) * static_cast<int>(lines.size());
+    const int titleLineHeight = renderer.getLineHeight(titlePick.fontId);
+    int totalTextHeight = titleLineHeight * static_cast<int>(lines.size());
     if (!lastBookAuthor.empty()) {
-      totalTextHeight += renderer.getLineHeight(UI_10_FONT_ID) * 3 / 2;
+      totalTextHeight += renderer.getLineHeight(authorPick.fontId) * 3 / 2;
     }
 
     // Vertically center the title block within the card
@@ -544,7 +551,8 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
     const auto truncatedAuthor = lastBookAuthor.empty()
                                      ? std::string{}
-                                     : renderer.truncatedText(UI_10_FONT_ID, lastBookAuthor.c_str(), bookWidth - 40);
+                                     : renderer.truncatedText(authorPick.fontId, lastBookAuthor.c_str(), bookWidth - 40,
+                                                               authorPick.style);
 
     // If cover image was rendered, draw box behind title and author
     if (coverRendered) {
@@ -552,13 +560,13 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       // Calculate the max text width for the box
       int maxTextWidth = 0;
       for (const auto& line : lines) {
-        const int lineWidth = renderer.getTextWidth(UI_12_FONT_ID, line.c_str());
+        const int lineWidth = renderer.getTextWidth(titlePick.fontId, line.c_str(), titlePick.style);
         if (lineWidth > maxTextWidth) {
           maxTextWidth = lineWidth;
         }
       }
       if (!truncatedAuthor.empty()) {
-        const int authorWidth = renderer.getTextWidth(UI_10_FONT_ID, truncatedAuthor.c_str());
+        const int authorWidth = renderer.getTextWidth(authorPick.fontId, truncatedAuthor.c_str(), authorPick.style);
         if (authorWidth > maxTextWidth) {
           maxTextWidth = authorWidth;
         }
@@ -576,13 +584,13 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     }
 
     for (const auto& line : lines) {
-      renderer.drawCenteredText(UI_12_FONT_ID, titleYStart, line.c_str(), !bookSelected);
-      titleYStart += renderer.getLineHeight(UI_12_FONT_ID);
+      renderer.drawCenteredText(titlePick.fontId, titleYStart, line.c_str(), !bookSelected, titlePick.style);
+      titleYStart += titleLineHeight;
     }
 
     if (!truncatedAuthor.empty()) {
-      titleYStart += renderer.getLineHeight(UI_10_FONT_ID) / 2;
-      renderer.drawCenteredText(UI_10_FONT_ID, titleYStart, truncatedAuthor.c_str(), !bookSelected);
+      titleYStart += renderer.getLineHeight(authorPick.fontId) / 2;
+      renderer.drawCenteredText(authorPick.fontId, titleYStart, truncatedAuthor.c_str(), !bookSelected, authorPick.style);
     }
 
     // "Continue Reading" label at the bottom

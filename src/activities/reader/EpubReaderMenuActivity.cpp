@@ -3,9 +3,12 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/TextFontPick.h"
 
 EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                const std::string& title, const int currentPage, const int totalPages,
@@ -26,6 +29,7 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
   if (hasFootnotes) {
     items.push_back({MenuAction::FOOTNOTES, StrId::STR_FOOTNOTES});
   }
+  items.push_back({MenuAction::DICTIONARY, StrId::STR_DICTIONARY});
   items.push_back({MenuAction::ROTATE_SCREEN, StrId::STR_ORIENTATION});
   items.push_back({MenuAction::AUTO_PAGE_TURN, StrId::STR_AUTO_TURN_PAGES_PER_MIN});
   items.push_back({MenuAction::GO_TO_PERCENT, StrId::STR_GO_TO_PERCENT});
@@ -39,6 +43,8 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
 
 void EpubReaderMenuActivity::onEnter() {
   Activity::onEnter();
+  // Free page-buffer / hot-group RAM before drawing (reader may have held tens of KB for JP).
+  ReaderUtils::releaseReaderFontDecompressionCache(renderer);
   requestUpdate();
 }
 
@@ -102,13 +108,20 @@ void EpubReaderMenuActivity::render(RenderLock&&) {
   const int hintGutterHeight = isPortraitInverted ? 50 : 0;
   const int contentY = hintGutterHeight;
 
-  // Title
+  // Drawing the metadata title in Noto JP can require a ~49KB+ decompressor "hot group" while free heap is
+  // often ~55KB (FDC "Low heap for hot group" → abort). That is what reboots the device when you press Select
+  // to open this menu from a Japanese book. Use short Latin chrome instead when the title is CJK or when the
+  // reader is set to Noto Sans JP (same font path as the page — still too tight for an extra title pass).
+  const bool safeHeader = TextFontPick::utf8NeedsCjkFont(title.c_str()) ||
+                          SETTINGS.fontFamily == CrossPointSettings::NOTOSANSJP;
+  const char* headerUtf8 = safeHeader ? tr(STR_READER_MENU_TITLE) : title.c_str();
+  const TextFontPick::BookLineFont titlePick = TextFontPick::titleChromeFont(headerUtf8);
   const std::string truncTitle =
-      renderer.truncatedText(UI_12_FONT_ID, title.c_str(), contentWidth - 40, EpdFontFamily::BOLD);
+      renderer.truncatedText(titlePick.fontId, headerUtf8, contentWidth - 40, titlePick.style);
   // Manual centering so we can respect the content gutter.
-  const int titleX =
-      contentX + (contentWidth - renderer.getTextWidth(UI_12_FONT_ID, truncTitle.c_str(), EpdFontFamily::BOLD)) / 2;
-  renderer.drawText(UI_12_FONT_ID, titleX, 15 + contentY, truncTitle.c_str(), true, EpdFontFamily::BOLD);
+  const int titleX = contentX +
+                     (contentWidth - renderer.getTextWidth(titlePick.fontId, truncTitle.c_str(), titlePick.style)) / 2;
+  renderer.drawText(titlePick.fontId, titleX, 15 + contentY, truncTitle.c_str(), true, titlePick.style);
 
   // Progress summary
   std::string progressLine;

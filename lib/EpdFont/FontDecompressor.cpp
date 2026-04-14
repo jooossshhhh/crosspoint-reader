@@ -5,6 +5,15 @@
 #include <Utf8.h>
 
 #include <cstdlib>
+#include <vector>
+
+namespace {
+// Bounds for hot-path allocations (getBitmap fallback). Prevents pathological
+// resize/alloc when heap is low or font metadata is inconsistent.
+constexpr uint32_t kMaxHotGroupBytes = 192 * 1024;
+constexpr uint32_t kMaxGlyphPackedBytes = 24 * 1024;
+constexpr uint32_t kHeapHeadroomGetBitmap = 28 * 1024;
+}  // namespace
 
 FontDecompressor::~FontDecompressor() { deinit(); }
 
@@ -33,12 +42,12 @@ void FontDecompressor::freePageBuffer() {
 }
 
 void FontDecompressor::freeHotGroup() {
-  hotGroup.clear();
-  hotGroup.shrink_to_fit();
   hotGroupFont = nullptr;
   hotGroupIndex = UINT16_MAX;
-  hotGlyphBuf.clear();
-  hotGlyphBuf.shrink_to_fit();
+  // Swap with empty vectors to release capacity without relying on shrink_to_fit
+  // (reduces allocator churn vs repeated clear+shrink on constrained heaps).
+  std::vector<uint8_t>().swap(hotGroup);
+  std::vector<uint8_t>().swap(hotGlyphBuf);
 }
 
 uint16_t FontDecompressor::getGroupIndex(const EpdFontData* fontData, uint32_t glyphIndex) {
@@ -174,9 +183,25 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
     stats.cacheMisses++;
     const EpdFontGroup& group = fontData->groups[groupIndex];
 
+    if (group.uncompressedSize == 0 || group.uncompressedSize > kMaxHotGroupBytes) {
+      LOG_ERR("FDC", "Bad hot group size %u (group %u)", group.uncompressedSize, groupIndex);
+      stats.getBitmapTimeUs += micros() - tStart;
+      return nullptr;
+    }
+    const uint32_t freeHeap = static_cast<uint32_t>(ESP.getFreeHeap());
+    if (group.uncompressedSize + kHeapHeadroomGetBitmap > freeHeap) {
+      LOG_ERR("FDC", "Low heap for hot group: need %u+%u, free %u", group.uncompressedSize, kHeapHeadroomGetBitmap,
+              freeHeap);
+      hotGroupFont = nullptr;
+      hotGroupIndex = UINT16_MAX;
+      stats.getBitmapTimeUs += micros() - tStart;
+      return nullptr;
+    }
+
     hotGroup.resize(group.uncompressedSize);
-    if (hotGroup.empty()) {
+    if (hotGroup.size() != group.uncompressedSize) {
       LOG_ERR("FDC", "Failed to allocate %u bytes for hot group %u", group.uncompressedSize, groupIndex);
+      std::vector<uint8_t>().swap(hotGroup);
       hotGroupFont = nullptr;
       hotGroupIndex = UINT16_MAX;
       stats.getBitmapTimeUs += micros() - tStart;
@@ -184,8 +209,7 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
     }
 
     if (!decompressGroup(fontData, groupIndex, hotGroup.data(), group.uncompressedSize)) {
-      hotGroup.clear();
-      hotGroup.shrink_to_fit();
+      std::vector<uint8_t>().swap(hotGroup);
       hotGroupFont = nullptr;
       hotGroupIndex = UINT16_MAX;
       stats.getBitmapTimeUs += micros() - tStart;
@@ -200,10 +224,29 @@ const uint8_t* FontDecompressor::getBitmap(const EpdFontData* fontData, const Ep
   }
 
   // Compact just the requested glyph from byte-aligned data into scratch buffer
-  if (glyph->dataLength > hotGlyphBuf.size()) {
-    hotGlyphBuf.resize(glyph->dataLength);
+  if (glyph->dataLength > kMaxGlyphPackedBytes) {
+    LOG_ERR("FDC", "Glyph packed length implausible: %u", static_cast<unsigned>(glyph->dataLength));
+    stats.getBitmapTimeUs += micros() - tStart;
+    return nullptr;
   }
-  if (hotGlyphBuf.empty()) {
+  if (glyph->dataLength > hotGlyphBuf.size()) {
+    if (glyph->dataLength + kHeapHeadroomGetBitmap > static_cast<uint32_t>(ESP.getFreeHeap())) {
+      LOG_ERR("FDC", "Low heap for glyph scratch %u bytes", static_cast<unsigned>(glyph->dataLength));
+      stats.getBitmapTimeUs += micros() - tStart;
+      return nullptr;
+    }
+    hotGlyphBuf.resize(glyph->dataLength);
+    if (hotGlyphBuf.size() < glyph->dataLength) {
+      LOG_ERR("FDC", "Failed to resize glyph scratch to %u bytes", static_cast<unsigned>(glyph->dataLength));
+      stats.getBitmapTimeUs += micros() - tStart;
+      return nullptr;
+    }
+  }
+  if (glyph->dataLength == 0) {
+    stats.getBitmapTimeUs += micros() - tStart;
+    return nullptr;
+  }
+  if (hotGlyphBuf.size() < glyph->dataLength) {
     stats.getBitmapTimeUs += micros() - tStart;
     return nullptr;
   }
@@ -252,8 +295,10 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
   }
   PageSlot& slot = pageSlots[pageSlotCount];
 
-  // Step 1: Collect unique glyph indices needed for this page
-  uint32_t neededGlyphs[MAX_PAGE_GLYPHS];
+  // Step 1: Collect unique glyph indices needed for this page (heap: avoids ~2KB+ on stack
+  // of the ActivityManager render task, which has limited stack for CJK prewarm + inflate).
+  std::vector<uint32_t> neededGlyphs;
+  neededGlyphs.resize(MAX_PAGE_GLYPHS);
   uint16_t glyphCount = 0;
   bool glyphCapWarned = false;
 
@@ -288,7 +333,7 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
 
   // Step 2: Compute total buffer size and collect unique groups
   uint32_t totalBytes = 0;
-  uint16_t neededGroups[128];
+  std::vector<uint16_t> neededGroups(128);
   uint8_t groupCount = 0;
   bool groupCapWarned = false;
 
@@ -313,6 +358,20 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
   }
 
   stats.uniqueGroupsAccessed = groupCount;
+
+  // Guard against huge dense CJK pages or low heap: malloc failure here used to leave
+  // fragile cache state; skipping prewarm falls back to hot-group per-glyph path.
+  constexpr uint32_t kMaxPageBitmapBytes = 56 * 1024;
+  const uint32_t freeHeap = static_cast<uint32_t>(ESP.getFreeHeap());
+  constexpr uint32_t kHeapReserve = 20 * 1024;
+  if (totalBytes > kMaxPageBitmapBytes) {
+    LOG_ERR("FDC", "Prewarm skipped: page bitmap %u bytes (cap %u)", totalBytes, kMaxPageBitmapBytes);
+    return static_cast<int>(glyphCount);
+  }
+  if (totalBytes + kHeapReserve > freeHeap) {
+    LOG_ERR("FDC", "Prewarm skipped: need %u+%u bytes, free heap %u", totalBytes, kHeapReserve, freeHeap);
+    return static_cast<int>(glyphCount);
+  }
 
   // Step 3: Allocate page buffer and lookup table for this slot
   slot.buffer = static_cast<uint8_t*>(malloc(totalBytes));
@@ -349,7 +408,7 @@ int FontDecompressor::prewarmCache(const EpdFontData* fontData, const char* utf8
 
   // Step 3b: Pre-scan to compute each needed glyph's byte-aligned offset within its group.
   // This avoids recomputing aligned offsets per group during extraction in step 4.
-  uint32_t groupAlignedTracker[128] = {};  // running byte-aligned offset for each needed group
+  std::vector<uint32_t> groupAlignedTracker(128, 0);  // running byte-aligned offset for each needed group
 
   if (fontData->glyphToGroup) {
     // Frequency-grouped: single O(totalGlyphs) pass through glyphToGroup

@@ -16,6 +16,7 @@
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
+#include "../reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -52,6 +53,9 @@ void HomeActivity::loadRecentBooks(int maxBooks) {
 
 void HomeActivity::loadRecentCovers(int coverHeight) {
   recentsLoading = true;
+  // Free compressed-font cache before Epub/Xtc metadata work to reduce peak heap contention.
+  ReaderUtils::releaseReaderFontDecompressionCache(renderer);
+
   bool showingLoading = false;
   Rect popupRect;
 
@@ -109,6 +113,9 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 
 void HomeActivity::onEnter() {
   Activity::onEnter();
+
+  // Drop reader font page buffers / hot-group RAM before Home draws CJK chrome (Lyra recents, etc.).
+  ReaderUtils::releaseReaderFontDecompressionCache(renderer);
 
   // Check if OPDS browser URL is configured
   hasOpdsUrl = strlen(SETTINGS.opdsServerUrl) > 0;

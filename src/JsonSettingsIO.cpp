@@ -120,6 +120,8 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["frontButtonConfirm"] = s.frontButtonConfirm;
   doc["frontButtonLeft"] = s.frontButtonLeft;
   doc["frontButtonRight"] = s.frontButtonRight;
+  // Reader fontFamily uses 0=Bookerly, 1=Noto Sans JP. Legacy files used four values (JP was 3).
+  doc["fontSchema"] = 1;
 
   String json;
   serializeJson(doc, json);
@@ -142,6 +144,8 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
   if (doc["statusBarChapterPageCount"].isNull()) {
     applyLegacyStatusBarSettings(s);
   }
+
+  const bool legacyReaderFontSchema = doc["fontSchema"].isNull();
 
   for (const auto& info : getSettingsList()) {
     if (!info.key) continue;
@@ -199,6 +203,17 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
   s.frontButtonRight =
       clamp(doc["frontButtonRight"] | (uint8_t)S::FRONT_HW_RIGHT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_RIGHT);
   CrossPointSettings::validateFrontButtonMapping(s);
+
+  if (legacyReaderFontSchema && !doc["fontFamily"].isNull()) {
+    const int raw = doc["fontFamily"].as<int>();
+    const uint8_t normalized =
+        (raw == 3) ? static_cast<uint8_t>(CrossPointSettings::NOTOSANSJP)
+                   : static_cast<uint8_t>(CrossPointSettings::BOOKERLY);
+    if (s.fontFamily != normalized) {
+      if (needsResave) *needsResave = true;
+    }
+    s.fontFamily = normalized;
+  }
 
   LOG_DBG("CPS", "Settings loaded from file");
 

@@ -3,6 +3,9 @@
 .DS_Store
 .vscode
 lib/EpdFont/fontsrc
+# Generated / vendor OTF (see source/NotoSansJP/README.md)
+lib/EpdFont/builtinFonts/source/NotoSansJP/*.otf
+lib/EpdFont/builtinFonts/source/NotoSansJP/NotoSansJP-ReaderSubset.ttf
 lib/I18n/I18nKeys.h
 lib/I18n/I18nStrings.h
 lib/I18n/I18nStrings.cpp
@@ -15,3 +18,5 @@ build
 .history/
 /.venv
 *.local*
+# Generated from scripts/build_kanjidic2_tsv.py (copy to SD as /dict/jp-dictionary.tsv)
+extras/dictionary/jp-dictionary.tsv

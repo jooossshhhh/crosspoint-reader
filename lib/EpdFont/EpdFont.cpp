@@ -167,8 +167,11 @@ const EpdGlyph* EpdFont::getGlyph(const uint32_t cp) const {
     }
   }
 
-  if (cp != REPLACEMENT_GLYPH) {
-    return getGlyph(REPLACEMENT_GLYPH);
+  // No glyph for this codepoint (e.g. CJK with Latin-only fonts): use a visible
+  // Basic Latin placeholder so text still advances and omissions are obvious.
+  constexpr uint32_t kMissingGlyphPlaceholder = 'X';
+  if (cp != kMissingGlyphPlaceholder) {
+    return getGlyph(kMissingGlyphPlaceholder);
   }
   return nullptr;
 }

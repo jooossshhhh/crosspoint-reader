@@ -52,9 +52,11 @@ void TxtReaderActivity::onExit() {
 
   pageOffsets.clear();
   currentPageLines.clear();
+  txt.reset();
+  ReaderUtils::releaseReaderFontDecompressionCache(renderer);
+
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
-  txt.reset();
 }
 
 void TxtReaderActivity::loop() {

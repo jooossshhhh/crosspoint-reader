@@ -2,6 +2,10 @@
 
 #include <Epub/Page.h>
 #include <Epub/blocks/TextBlock.h>
+
+#include <algorithm>
+#include <limits>
+#include <vector>
 #include <FontCacheManager.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -21,8 +25,10 @@
 #include "QrDisplayActivity.h"
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
+#include "activities/util/DictionaryResultActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/DictionaryLookup.h"
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -39,6 +45,61 @@ int clampPercent(int percent) {
     return 100;
   }
   return percent;
+}
+
+}  // namespace
+
+namespace {
+
+void collectSortedTextLineIndices(const Page& page, std::vector<size_t>& out) {
+  out.clear();
+  struct K {
+    size_t idx;
+    int16_t y;
+    int16_t x;
+  };
+  std::vector<K> tmp;
+  for (size_t i = 0; i < page.elements.size(); i++) {
+    if (page.elements[i]->getTag() == TAG_PageLine) {
+      tmp.push_back(K{i, page.elements[i]->yPos, page.elements[i]->xPos});
+    }
+  }
+  std::sort(tmp.begin(), tmp.end(), [](const K& a, const K& b) {
+    if (a.y != b.y) {
+      return a.y < b.y;
+    }
+    return a.x < b.x;
+  });
+  for (const auto& k : tmp) {
+    out.push_back(k.idx);
+  }
+}
+
+void flattenTextBlockWords(const TextBlock& tb, std::string& out) {
+  out.clear();
+  for (const auto& w : tb.getWords()) {
+    out += w;
+  }
+}
+
+int prefixWidthToCp(GfxRenderer& renderer, int fontId, EpdFontFamily::Style st, const char* word, int cpBefore) {
+  int acc = 0;
+  for (int i = 0; i < cpBefore; i++) {
+    char buf[8];
+    if (!utf8NthCodepointToBuffer(word, i, buf, sizeof(buf))) {
+      break;
+    }
+    acc += renderer.getTextAdvanceX(fontId, buf, st);
+  }
+  return acc;
+}
+
+int singleCpWidth(GfxRenderer& renderer, int fontId, EpdFontFamily::Style st, const char* word, int cpIdx) {
+  char buf[8];
+  if (!utf8NthCodepointToBuffer(word, cpIdx, buf, sizeof(buf))) {
+    return 0;
+  }
+  return renderer.getTextAdvanceX(fontId, buf, st);
 }
 
 }  // namespace
@@ -93,13 +154,17 @@ void EpubReaderActivity::onEnter() {
 void EpubReaderActivity::onExit() {
   Activity::onExit();
 
+  clearDictionaryMode();
+
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
 
-  APP_STATE.readerActivityLoadCount = 0;
-  APP_STATE.saveToFile();
   section.reset();
   epub.reset();
+  ReaderUtils::releaseReaderFontDecompressionCache(renderer);
+
+  APP_STATE.readerActivityLoadCount = 0;
+  APP_STATE.saveToFile();
 }
 
 void EpubReaderActivity::loop() {
@@ -109,7 +174,17 @@ void EpubReaderActivity::loop() {
     return;
   }
 
-  if (automaticPageTurnActive) {
+  // Dictionary mode: side buttons move row/char; Confirm picks row or runs lookup; short Back unwinds; long Back falls
+  // through to file browser.
+  if (dictionaryMode && section) {
+    if (!(mappedInput.isPressed(MappedInputManager::Button::Back) &&
+          mappedInput.getHeldTime() >= ReaderUtils::GO_HOME_MS)) {
+      consumeDictionaryModeNavigation();
+      return;
+    }
+  }
+
+  if (!dictionaryMode && automaticPageTurnActive) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
         mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       automaticPageTurnActive = false;
@@ -136,7 +211,7 @@ void EpubReaderActivity::loop() {
   }
 
   // Enter reader menu activity.
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+  if (!dictionaryMode && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     const int currentPage = section ? section->currentPage + 1 : 0;
     const int totalPages = section ? section->pageCount : 0;
     float bookProgress = 0.0f;
@@ -145,6 +220,9 @@ void EpubReaderActivity::loop() {
       bookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress) * 100.0f;
     }
     const int bookProgressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
+    // Free reader font bitmap cache before allocating the menu activity and its first frame (Japanese books
+    // otherwise peak heap with reader JP + menu NOTOSANSJP_14).
+    ReaderUtils::releaseReaderFontDecompressionCache(renderer);
     startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
                                renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
                                SETTINGS.orientation, !currentPageFootnotes.empty()),
@@ -197,6 +275,7 @@ void EpubReaderActivity::loop() {
 
   if (skipChapter) {
     lastPageTurnTime = millis();
+    clearDictionaryMode();
     // We don't want to delete the section mid-render, so grab the semaphore
     {
       RenderLock lock(*this);
@@ -227,6 +306,8 @@ void EpubReaderActivity::jumpToPercent(int percent) {
   if (!epub) {
     return;
   }
+
+  clearDictionaryMode();
 
   const size_t bookSize = epub->getBookSize();
   if (bookSize == 0) {
@@ -286,7 +367,17 @@ void EpubReaderActivity::jumpToPercent(int percent) {
 
 void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action) {
   switch (action) {
+    case EpubReaderMenuActivity::MenuAction::DICTIONARY: {
+      automaticPageTurnActive = false;
+      dictionaryMode = true;
+      dictionaryRowCommitted = false;
+      dictionaryRowIndex = 0;
+      dictionaryCharIndex = 0;
+      requestUpdate();
+      break;
+    }
     case EpubReaderMenuActivity::MenuAction::SELECT_CHAPTER: {
+      clearDictionaryMode();
       const int spineIdx = currentSpineIndex;
       const std::string path = epub->getPath();
       startActivityForResult(
@@ -302,6 +393,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::FOOTNOTES: {
+      clearDictionaryMode();
       startActivityForResult(std::make_unique<EpubReaderFootnotesActivity>(renderer, mappedInput, currentPageFootnotes),
                              [this](const ActivityResult& result) {
                                if (!result.isCancelled) {
@@ -313,6 +405,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::GO_TO_PERCENT: {
+      clearDictionaryMode();
       float bookProgress = 0.0f;
       if (epub && epub->getBookSize() > 0 && section && section->pageCount > 0) {
         const float chapterProgress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
@@ -329,6 +422,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::DISPLAY_QR: {
+      clearDictionaryMode();
       if (section && section->currentPage >= 0 && section->currentPage < section->pageCount) {
         auto p = section->loadPageFromSectionFile();
         if (p) {
@@ -357,10 +451,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::GO_HOME: {
+      clearDictionaryMode();
       onGoHome();
       return;
     }
     case EpubReaderMenuActivity::MenuAction::DELETE_CACHE: {
+      clearDictionaryMode();
       {
         RenderLock lock(*this);
         if (epub && section) {
@@ -377,6 +473,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       return;
     }
     case EpubReaderMenuActivity::MenuAction::SCREENSHOT: {
+      clearDictionaryMode();
       {
         RenderLock lock(*this);
         pendingScreenshot = true;
@@ -385,6 +482,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::SYNC: {
+      clearDictionaryMode();
       if (KOREADER_STORE.hasCredentials()) {
         const int currentPage = section ? section->currentPage : 0;
         const int totalPages = section ? section->pageCount : 0;
@@ -413,6 +511,8 @@ void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
   if (SETTINGS.orientation == orientation) {
     return;
   }
+
+  clearDictionaryMode();
 
   // Preserve current reading position so we can restore after reflow.
   {
@@ -449,6 +549,7 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
   const uint8_t statusBarHeight = UITheme::getInstance().getStatusBarHeight();
   // resets cached section so that space is reserved for auto page turn indicator when None or progress bar only
   if (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight()) {
+    clearDictionaryMode();
     // Preserve current reading position so we can restore after reflow.
     RenderLock lock(*this);
     if (section) {
@@ -461,6 +562,7 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
 }
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
+  clearDictionaryMode();
   if (isForwardTurn) {
     if (section->currentPage < section->pageCount - 1) {
       section->currentPage++;
@@ -716,11 +818,19 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   LOG_DBG("ERS", "Heap: before=%lu after=%lu delta=%ld", heapBefore, heapAfter,
           (int32_t)heapAfter - (int32_t)heapBefore);
 
+  // Dictionary row/char highlight is drawn on the BW framebuffer. Grayscale AA replaces that with two passes that
+  // never called drawDictionaryOverlay, so users with text anti-aliasing on saw no selection box and every
+  // navigation still triggered a full (expensive) gray pipeline. Skip gray while picking a dictionary key.
+  const bool useGrayAa = SETTINGS.textAntiAliasing && !dictionaryMode;
   // Force special handling for pages with images when anti-aliasing is on
-  bool imagePageWithAA = page->hasImages() && SETTINGS.textAntiAliasing;
+  bool imagePageWithAA = page->hasImages() && useGrayAa;
 
   page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
   renderStatusBar();
+  if (dictionaryMode) {
+    const int contentW = renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight;
+    drawDictionaryOverlay(*page, orientedMarginLeft, orientedMarginTop, contentW);
+  }
   fcm->logStats("bw_render");
   const auto tBwRender = millis();
 
@@ -754,7 +864,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
   // grayscale rendering
   // TODO: Only do this if font supports it
-  if (SETTINGS.textAntiAliasing) {
+  if (useGrayAa) {
     renderer.clearScreen(0x00);
     renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
     page->render(renderer, SETTINGS.getReaderFontId(), orientedMarginLeft, orientedMarginTop);
@@ -837,6 +947,8 @@ void EpubReaderActivity::renderStatusBar() const {
 void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition) {
   if (!epub) return;
 
+  clearDictionaryMode();
+
   // Push current position onto saved stack
   if (savePosition && section && footnoteDepth < MAX_FOOTNOTE_DEPTH) {
     savedPositions[footnoteDepth] = {currentSpineIndex, section->currentPage};
@@ -880,6 +992,7 @@ void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool s
 
 void EpubReaderActivity::restoreSavedPosition() {
   if (footnoteDepth <= 0) return;
+  clearDictionaryMode();
   footnoteDepth--;
   const auto& pos = savedPositions[footnoteDepth];
   LOG_DBG("ERS", "Restoring position [%d]: spine %d, page %d", footnoteDepth, pos.spineIndex, pos.pageNumber);
@@ -891,4 +1004,232 @@ void EpubReaderActivity::restoreSavedPosition() {
     section.reset();
   }
   requestUpdate();
+}
+
+void EpubReaderActivity::clearDictionaryMode() {
+  dictionaryMode = false;
+  dictionaryRowCommitted = false;
+  dictionaryRowIndex = 0;
+  dictionaryCharIndex = 0;
+}
+
+void EpubReaderActivity::consumeDictionaryModeNavigation() {
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back) &&
+      mappedInput.getHeldTime() < ReaderUtils::GO_HOME_MS) {
+    if (dictionaryRowCommitted) {
+      dictionaryRowCommitted = false;
+    } else {
+      clearDictionaryMode();
+    }
+    requestUpdate();
+    return;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    auto page = section->loadPageFromSectionFile();
+    if (!page) {
+      requestUpdate();
+      return;
+    }
+    std::vector<size_t> lineEls;
+    collectSortedTextLineIndices(*page, lineEls);
+    if (lineEls.empty()) {
+      requestUpdate();
+      return;
+    }
+    if (dictionaryRowIndex < 0 || dictionaryRowIndex >= static_cast<int>(lineEls.size())) {
+      dictionaryRowIndex = 0;
+    }
+    if (!dictionaryRowCommitted) {
+      dictionaryRowCommitted = true;
+      dictionaryCharIndex = 0;
+      const auto& el = page->elements[lineEls[static_cast<size_t>(dictionaryRowIndex)]];
+      const auto& pl = static_cast<const PageLine&>(*el);
+      std::string flat;
+      flattenTextBlockWords(*pl.getBlock(), flat);
+      const int maxCp = static_cast<int>(utf8CountCodepoints(flat.c_str())) - 1;
+      if (maxCp < 0) {
+        dictionaryRowCommitted = false;
+      } else if (dictionaryCharIndex > maxCp) {
+        dictionaryCharIndex = maxCp;
+      }
+    } else {
+      performDictionaryLookup();
+    }
+    requestUpdate();
+    return;
+  }
+
+  // Match page-turn mapping: side buttons and front Left/Right (see ReaderUtils::detectPageTurn).
+  const bool up = mappedInput.wasReleased(MappedInputManager::Button::PageBack) ||
+                    mappedInput.wasReleased(MappedInputManager::Button::Left);
+  const bool down = mappedInput.wasReleased(MappedInputManager::Button::PageForward) ||
+                      mappedInput.wasReleased(MappedInputManager::Button::Right);
+  if (up || down) {
+    const int delta = up ? -1 : 1;
+    if (!dictionaryRowCommitted) {
+      moveDictionaryRow(delta);
+    } else {
+      moveDictionaryChar(delta);
+    }
+    requestUpdate();
+  }
+}
+
+void EpubReaderActivity::moveDictionaryRow(const int delta) {
+  auto page = section->loadPageFromSectionFile();
+  if (!page) {
+    return;
+  }
+  std::vector<size_t> lineEls;
+  collectSortedTextLineIndices(*page, lineEls);
+  if (lineEls.empty()) {
+    return;
+  }
+  const int n = static_cast<int>(lineEls.size());
+  dictionaryRowIndex += delta;
+  if (dictionaryRowIndex < 0) {
+    dictionaryRowIndex = 0;
+  } else if (dictionaryRowIndex >= n) {
+    dictionaryRowIndex = n - 1;
+  }
+}
+
+void EpubReaderActivity::moveDictionaryChar(const int delta) {
+  auto page = section->loadPageFromSectionFile();
+  if (!page) {
+    return;
+  }
+  std::vector<size_t> lineEls;
+  collectSortedTextLineIndices(*page, lineEls);
+  if (lineEls.empty() || dictionaryRowIndex < 0 || dictionaryRowIndex >= static_cast<int>(lineEls.size())) {
+    return;
+  }
+  const auto& el = page->elements[lineEls[static_cast<size_t>(dictionaryRowIndex)]];
+  if (el->getTag() != TAG_PageLine) {
+    return;
+  }
+  const auto& pl = static_cast<const PageLine&>(*el);
+  std::string flat;
+  flattenTextBlockWords(*pl.getBlock(), flat);
+  const int ncp = static_cast<int>(utf8CountCodepoints(flat.c_str()));
+  if (ncp <= 0) {
+    return;
+  }
+  dictionaryCharIndex += delta;
+  if (dictionaryCharIndex < 0) {
+    dictionaryCharIndex = 0;
+  } else if (dictionaryCharIndex >= ncp) {
+    dictionaryCharIndex = ncp - 1;
+  }
+}
+
+void EpubReaderActivity::performDictionaryLookup() {
+  auto page = section->loadPageFromSectionFile();
+  if (!page) {
+    return;
+  }
+  std::vector<size_t> lineEls;
+  collectSortedTextLineIndices(*page, lineEls);
+  if (lineEls.empty() || dictionaryRowIndex < 0 || dictionaryRowIndex >= static_cast<int>(lineEls.size())) {
+    return;
+  }
+  const auto& el = page->elements[lineEls[static_cast<size_t>(dictionaryRowIndex)]];
+  if (el->getTag() != TAG_PageLine) {
+    return;
+  }
+  const auto& pl = static_cast<const PageLine&>(*el);
+  std::string flat;
+  flattenTextBlockWords(*pl.getBlock(), flat);
+  char keyBuf[16];
+  if (!utf8NthCodepointToBuffer(flat.c_str(), dictionaryCharIndex, keyBuf, sizeof(keyBuf))) {
+    startActivityForResult(std::make_unique<DictionaryResultActivity>(renderer, mappedInput, std::string(tr(STR_DICTIONARY)),
+                                                                      std::string(tr(STR_DICTIONARY_NO_ENTRY))),
+                           [](const ActivityResult&) {});
+    return;
+  }
+
+  FsFile f;
+  if (!Storage.openFileForRead("DICT", JP_DICTIONARY_SDCARD_PATH, f)) {
+    startActivityForResult(std::make_unique<DictionaryResultActivity>(renderer, mappedInput, std::string(keyBuf),
+                                                                      std::string(tr(STR_DICTIONARY_NO_FILE))),
+                           [](const ActivityResult&) {});
+    return;
+  }
+  const size_t sz = f.fileSize();
+  char gloss[768];
+  const bool found = dictionaryLookupSortedTsv(f, sz, keyBuf, gloss, sizeof(gloss));
+  f.close();
+  if (!found) {
+    startActivityForResult(std::make_unique<DictionaryResultActivity>(renderer, mappedInput, std::string(keyBuf),
+                                                                      std::string(tr(STR_DICTIONARY_NO_ENTRY))),
+                           [](const ActivityResult&) {});
+    return;
+  }
+  startActivityForResult(
+      std::make_unique<DictionaryResultActivity>(renderer, mappedInput, std::string(keyBuf), std::string(gloss)),
+      [](const ActivityResult&) {});
+}
+
+void EpubReaderActivity::drawDictionaryOverlay(const Page& page, const int marginLeft, const int marginTop,
+                                               const int contentWidth) {
+  (void)contentWidth;
+  std::vector<size_t> lineEls;
+  collectSortedTextLineIndices(page, lineEls);
+  if (lineEls.empty()) {
+    return;
+  }
+  int rowIdx = dictionaryRowIndex;
+  if (rowIdx < 0 || rowIdx >= static_cast<int>(lineEls.size())) {
+    rowIdx = 0;
+  }
+
+  const auto& rowEl = page.elements[lineEls[static_cast<size_t>(rowIdx)]];
+  if (rowEl->getTag() != TAG_PageLine) {
+    return;
+  }
+  const auto& pl = static_cast<const PageLine&>(*rowEl);
+  const auto& block = *pl.getBlock();
+  const auto& words = block.getWords();
+  const auto& xpos = block.getWordXpos();
+  const auto& styles = block.getWordStyles();
+  if (words.empty() || words.size() != xpos.size() || words.size() != styles.size()) {
+    return;
+  }
+
+  const int fontId = SETTINGS.getReaderFontId();
+  const int lineY = pl.yPos + marginTop;
+  const int lineX0 = pl.xPos + marginLeft;
+
+  int minX = std::numeric_limits<int>::max();
+  int maxR = std::numeric_limits<int>::min();
+  for (size_t i = 0; i < words.size(); i++) {
+    const int wx = lineX0 + xpos[i];
+    const int rw = renderer.getTextWidth(fontId, words[i].c_str(), styles[i]);
+    minX = std::min(minX, wx);
+    maxR = std::max(maxR, wx + rw);
+  }
+  const int lineH = renderer.getLineHeight(fontId);
+
+  if (!dictionaryRowCommitted) {
+    renderer.drawRect(minX - 2, lineY - 2, maxR - minX + 4, lineH + 4, 2, true);
+    return;
+  }
+
+  int cpLeft = dictionaryCharIndex;
+  int penX = lineX0;
+  for (size_t i = 0; i < words.size(); i++) {
+    const char* w = words[i].c_str();
+    const int wcps = static_cast<int>(utf8CountCodepoints(w));
+    const EpdFontFamily::Style st = styles[i];
+    if (cpLeft >= wcps) {
+      penX += renderer.getTextWidth(fontId, w, st);
+      cpLeft -= wcps;
+    } else {
+      penX += prefixWidthToCp(renderer, fontId, st, w, cpLeft);
+      const int cw = singleCpWidth(renderer, fontId, st, w, cpLeft);
+      renderer.drawRect(penX - 1, lineY - 1, cw + 2, lineH + 2, 2, true);
+      return;
+    }
+  }
 }

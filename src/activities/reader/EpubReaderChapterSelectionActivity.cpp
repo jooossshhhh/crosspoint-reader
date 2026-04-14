@@ -6,6 +6,7 @@
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/TextFontPick.h"
 
 int EpubReaderChapterSelectionActivity::getTotalItems() const { return epub->getTocItemsCount(); }
 
@@ -124,10 +125,11 @@ void EpubReaderChapterSelectionActivity::render(RenderLock&&) {
 
     // Indent per TOC level while keeping content within the gutter-safe region.
     const int indentSize = contentX + 20 + (item.level - 1) * 15;
-    const std::string chapterName =
-        renderer.truncatedText(UI_10_FONT_ID, item.title.c_str(), contentWidth - 40 - indentSize);
+    const auto chapPick = TextFontPick::listPrimaryLineFont(item.title.c_str());
+    const std::string chapterName = renderer.truncatedText(chapPick.fontId, item.title.c_str(),
+                                                          contentWidth - 40 - indentSize, chapPick.style);
 
-    renderer.drawText(UI_10_FONT_ID, indentSize, displayY, chapterName.c_str(), !isSelected);
+    renderer.drawText(chapPick.fontId, indentSize, displayY, chapterName.c_str(), !isSelected, chapPick.style);
   }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));

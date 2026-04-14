@@ -38,6 +38,19 @@ class EpubReaderActivity final : public Activity {
   SavedPosition savedPositions[MAX_FOOTNOTE_DEPTH] = {};
   int footnoteDepth = 0;
 
+  // Dictionary selection (row then single character; side buttons = move, Confirm = pick / lookup, Back = unwind)
+  bool dictionaryMode = false;
+  bool dictionaryRowCommitted = false;
+  int dictionaryRowIndex = 0;
+  int dictionaryCharIndex = 0;
+
+  void clearDictionaryMode();
+  void consumeDictionaryModeNavigation();
+  void moveDictionaryRow(int delta);
+  void moveDictionaryChar(int delta);
+  void performDictionaryLookup();
+  void drawDictionaryOverlay(const Page& page, int marginLeft, int marginTop, int contentWidth);
+
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void renderStatusBar() const;
